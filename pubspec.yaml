@@ -35,6 +35,9 @@ dependencies:
   latlong2: ^0.9.1         # Coordinate system
   geolocator: ^14.0.2        # NEW: For live location
   flutter_map_location_marker: ^10.2.0  # NEW: For the blue dot on map
+  flutter_iconpicker: ^4.0.3
+  http: ^1.6.0
+  flutter_secure_storage: ^9.2.2
 
 
   # The following adds the Cupertino Icons font to your application.

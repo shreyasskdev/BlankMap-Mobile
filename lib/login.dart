@@ -1,10 +1,11 @@
-// ==========================================
-// 1. LOGIN SCREEN
-// ==========================================
+import 'dart:convert';
 import 'package:blankmap_mobile/main.dart';
 import 'package:blankmap_mobile/shared.dart';
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+const baseUrl = "http://10.66.139.169:9000";
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -15,7 +16,16 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen>
     with SingleTickerProviderStateMixin {
-  final TextEditingController _ctrl = TextEditingController();
+  final emailCtrl = TextEditingController();
+  final passCtrl = TextEditingController();
+  final nameCtrl = TextEditingController();
+
+  final storage = const FlutterSecureStorage();
+
+  bool loading = false;
+  bool isRegister = false;
+  bool checkingAuth = true;
+
   late final AnimationController _anim;
   late final Animation<double> _fade;
   late final Animation<Offset> _slide;
@@ -23,35 +33,160 @@ class _LoginScreenState extends State<LoginScreen>
   @override
   void initState() {
     super.initState();
+
     _anim = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 800),
     );
+
     _fade = CurvedAnimation(parent: _anim, curve: Curves.easeOut);
+
     _slide = Tween<Offset>(
       begin: const Offset(0, 0.07),
       end: Offset.zero,
-    ).animate(CurvedAnimation(parent: _anim, curve: Curves.easeOut));
+    ).animate(_fade);
+
     _anim.forward();
+
+    checkLogin();
+  }
+
+  Future<void> checkLogin() async {
+    final token = await storage.read(key: "jwt");
+
+    print("CHECKING STORED TOKEN: $token");
+
+    if (token != null) {
+      print("JWT FOUND -> AUTO LOGIN");
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        CupertinoPageRoute(builder: (_) => const MainNav(username: "User")),
+      );
+    }
+
+    setState(() => checkingAuth = false);
   }
 
   @override
   void dispose() {
     _anim.dispose();
-    _ctrl.dispose();
+    emailCtrl.dispose();
+    passCtrl.dispose();
+    nameCtrl.dispose();
     super.dispose();
   }
 
-  void _login() {
-    if (_ctrl.text.trim().isEmpty) return;
-    Navigator.pushReplacement(
-      context,
-      CupertinoPageRoute(builder: (_) => MainNav(username: _ctrl.text.trim())),
+  Future<void> submit() async {
+    final email = emailCtrl.text.trim();
+    final pass = passCtrl.text.trim();
+    final name = nameCtrl.text.trim();
+
+    if (email.isEmpty || pass.isEmpty) return;
+
+    setState(() => loading = true);
+
+    try {
+      if (isRegister) {
+        print("REGISTER REQUEST");
+
+        final res = await http.post(
+          Uri.parse("$baseUrl/auth/register"),
+          headers: {"Content-Type": "application/json"},
+          body: jsonEncode({"email": email, "name": name, "password": pass}),
+        );
+
+        print("REGISTER STATUS: ${res.statusCode}");
+        print("REGISTER BODY: ${res.body}");
+
+        if (res.statusCode == 409) {
+          showError("Email already exists");
+          setState(() => loading = false);
+          return;
+        }
+
+        if (res.statusCode != 200 && res.statusCode != 201) {
+          showError("Registration failed");
+          setState(() => loading = false);
+          return;
+        }
+      }
+
+      print("LOGIN REQUEST");
+
+      final res = await http.post(
+        Uri.parse("$baseUrl/auth/login"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"email": email, "password": pass}),
+      );
+
+      print("LOGIN STATUS: ${res.statusCode}");
+      print("LOGIN BODY: ${res.body}");
+
+      if (res.statusCode != 200) {
+        showError("Invalid email or password");
+        setState(() => loading = false);
+        return;
+      }
+
+      final data = jsonDecode(res.body);
+      final token = data["token"];
+
+      print("JWT RECEIVED: $token");
+
+      await storage.write(key: "jwt", value: token);
+
+      print("JWT SAVED");
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        CupertinoPageRoute(builder: (_) => MainNav(username: email)),
+      );
+    } catch (e, s) {
+      print("AUTH ERROR: $e");
+      print(s);
+      showError("Network error");
+    }
+
+    setState(() => loading = false);
+  }
+
+  void toggleMode() {
+    setState(() {
+      isRegister = !isRegister;
+    });
+  }
+
+  void showError(String msg) {
+    print("UI ERROR: $msg");
+
+    showCupertinoDialog(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text("Error"),
+        content: Text(msg),
+        actions: [
+          CupertinoDialogAction(
+            child: const Text("OK"),
+            onPressed: () => Navigator.pop(context),
+          ),
+        ],
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    if (checkingAuth) {
+      return const CupertinoPageScaffold(
+        child: Center(child: CupertinoActivityIndicator(radius: 14)),
+      );
+    }
+
     return CupertinoPageScaffold(
       backgroundColor: BM.bg,
       child: SafeArea(
@@ -66,7 +201,6 @@ class _LoginScreenState extends State<LoginScreen>
                 children: [
                   const Spacer(flex: 2),
 
-                  // Logo
                   Container(
                     width: 58,
                     height: 58,
@@ -94,108 +228,74 @@ class _LoginScreenState extends State<LoginScreen>
                       fontWeight: FontWeight.w900,
                       color: BM.textPri,
                       letterSpacing: -2,
-                      height: 1.0,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-
-                  // Gradient subtitle
-                  ShaderMask(
-                    shaderCallback: (b) => const LinearGradient(
-                      colors: [BM.accent, Color(0xFF3B82F6)],
-                    ).createShader(b),
-                    child: const Text(
-                      'Your city. Uncensored.',
-                      style: TextStyle(
-                        fontSize: 19,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
-                        letterSpacing: -0.2,
-                      ),
                     ),
                   ),
 
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 8),
+
                   const Text(
-                    'Commercial maps hide what matters.\n'
-                    'BlankMap is built by citizens, for citizens.',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: BM.textSec,
-                      height: 1.65,
-                    ),
+                    'Your city. Uncensored.',
+                    style: TextStyle(fontSize: 18, color: BM.textSec),
                   ),
 
                   const Spacer(flex: 2),
 
-                  // Stats card
-                  GlassCard(
-                    padding: const EdgeInsets.symmetric(
-                      vertical: 22,
-                      horizontal: 14,
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: const [
-                        StatBadge(value: '18', label: 'SubMaps'),
-                        VDivider(),
-                        StatBadge(value: '6.2K', label: 'Pins'),
-                        VDivider(),
-                        StatBadge(value: '840+', label: 'Citizens'),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 28),
-
-                  // Username field
-                  Container(
-                    decoration: BoxDecoration(
-                      color: BM.surface,
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: BM.border),
-                    ),
-                    child: CupertinoTextField(
-                      controller: _ctrl,
-                      placeholder: 'Choose a civic username',
-                      placeholderStyle: const TextStyle(
-                        color: BM.textTer,
-                        fontSize: 15,
-                      ),
-                      style: const TextStyle(color: BM.textPri, fontSize: 15),
+                  if (isRegister) ...[
+                    CupertinoTextField(
+                      controller: nameCtrl,
+                      placeholder: 'Name',
                       padding: const EdgeInsets.symmetric(
                         horizontal: 16,
                         vertical: 15,
                       ),
-                      decoration: null,
-                      prefix: const Padding(
-                        padding: EdgeInsets.only(left: 14),
-                        child: Icon(
-                          CupertinoIcons.person,
-                          color: BM.accent,
-                          size: 18,
-                        ),
-                      ),
-                      onSubmitted: (_) => _login(),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+
+                  CupertinoTextField(
+                    controller: emailCtrl,
+                    placeholder: 'Email',
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 15,
                     ),
                   ),
 
                   const SizedBox(height: 14),
 
-                  AccentButton(
-                    label: 'Join the Map',
-                    icon: CupertinoIcons.arrow_right,
-                    onPressed: _login,
+                  CupertinoTextField(
+                    controller: passCtrl,
+                    placeholder: 'Password',
+                    obscureText: true,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 15,
+                    ),
                   ),
 
-                  const SizedBox(height: 10),
-                  const Center(
-                    child: Text(
-                      'Free forever · No ads · No data selling',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: BM.textTer,
-                        letterSpacing: 0.1,
+                  const SizedBox(height: 20),
+
+                  SizedBox(
+                    width: double.infinity,
+                    child: CupertinoButton.filled(
+                      onPressed: loading ? null : submit,
+                      child: loading
+                          ? const CupertinoActivityIndicator()
+                          : Text(isRegister ? "Create Account" : "Login"),
+                    ),
+                  ),
+
+                  const SizedBox(height: 12),
+
+                  Center(
+                    child: CupertinoButton(
+                      padding: EdgeInsets.zero,
+                      onPressed: toggleMode,
+                      child: Text(
+                        isRegister
+                            ? "Already have an account? Login"
+                            : "Create an account",
+                        style: const TextStyle(color: BM.accent),
                       ),
                     ),
                   ),

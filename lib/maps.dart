@@ -183,7 +183,8 @@ class _MapScreenState extends State<MapScreen> {
                 child: const Icon(
                   CupertinoIcons.location_solid,
                   color: BM.accent,
-                  size: 26,
+                  size: 38,
+                  shadows: [Shadow(color: Colors.black54, blurRadius: 10)],
                 ),
               ),
               const SizedBox(height: 14),
@@ -361,6 +362,9 @@ class _MapScreenState extends State<MapScreen> {
                             CupertinoIcons.location_solid,
                             color: BM.accent,
                             size: 38,
+                            shadows: [
+                              Shadow(color: Colors.black54, blurRadius: 20),
+                            ],
                           ),
                         ],
                       ),
