@@ -1,16 +1,19 @@
 // ==========================================
 // 5. MAP SCREEN
 // ==========================================
+import 'dart:convert';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_map_location_marker/flutter_map_location_marker.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
 import 'package:blankmap_mobile/shared.dart';
 import 'package:latlong2/latlong.dart';
 
 // ==========================================
-// 4. MAP PIN MODEL
+// 4. MAP PIN MODEL  (unchanged)
 // ==========================================
 class MapPin {
   final String id;
@@ -18,7 +21,6 @@ class MapPin {
   final String layer;
   int upvotes;
   int downvotes;
-
   MapPin({
     required this.id,
     required this.location,
@@ -31,23 +33,28 @@ class MapPin {
 class MapScreen extends StatefulWidget {
   final String activeLayer;
   final Function(String) onLayerChanged;
-
   const MapScreen({
     super.key,
     required this.activeLayer,
     required this.onLayerChanged,
   });
-
   @override
   State<MapScreen> createState() => _MapScreenState();
 }
 
 class _MapScreenState extends State<MapScreen> {
   final MapController _mapCtrl = MapController();
+  final _storage = const FlutterSecureStorage();
+
   LatLng _userLoc = const LatLng(28.6315, 77.2167);
   bool _locLoaded = false;
 
-  static final List<MapPin> _pins = [];
+  // Pins are fetched from the API and kept here
+  List<MapPin> _pins = [];
+  bool _pinsLoading = false;
+
+  // Maps layer display-name → blank-map UUID (resolved once on init)
+  final Map<String, String> _layerNameToId = {};
 
   final List<String> _quickLayers = allBlankMaps
       .take(6)
@@ -58,8 +65,47 @@ class _MapScreenState extends State<MapScreen> {
   void initState() {
     super.initState();
     _initLoc();
+    _loadBlankMapIds().then((_) => _fetchPins());
   }
 
+  @override
+  void didUpdateWidget(MapScreen old) {
+    super.didUpdateWidget(old);
+    if (old.activeLayer != widget.activeLayer) {
+      _fetchPins();
+    }
+  }
+
+  // ── Auth helper ──────────────────────────────────────────────────────────
+  Future<String?> _getToken() => _storage.read(key: 'jwt');
+
+  // ── Resolve layer name → blank-map UUID from GET /blank-maps ────────────
+  Future<void> _loadBlankMapIds() async {
+    try {
+      final token = await _getToken();
+      final res = await http.get(
+        Uri.parse('$baseUrl/blank-maps'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+      );
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as List;
+        for (final m in data) {
+          final name = (m['name'] ?? m['tag'] ?? '') as String;
+          final id = (m['id'] ?? '') as String;
+          if (name.isNotEmpty && id.isNotEmpty) _layerNameToId[name] = id;
+        }
+      }
+    } catch (e) {
+      debugPrint('Load blank-map IDs error: $e');
+    }
+  }
+
+  String? get _activeBlankMapId => _layerNameToId[widget.activeLayer];
+
+  // ── Location ─────────────────────────────────────────────────────────────
   Future<void> _initLoc() async {
     try {
       bool svcOn = await Geolocator.isLocationServiceEnabled();
@@ -70,7 +116,6 @@ class _MapScreenState extends State<MapScreen> {
         if (perm == LocationPermission.denied) return;
       }
       if (perm == LocationPermission.deniedForever) return;
-
       final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
@@ -85,19 +130,197 @@ class _MapScreenState extends State<MapScreen> {
     } catch (_) {}
   }
 
-  void _dropPin() {
-    setState(() {
-      _pins.add(
-        MapPin(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          location: _mapCtrl.camera.center,
-          layer: widget.activeLayer,
-        ),
+  // ==========================================
+  // API – GET /pins?blank_map_id=<uuid>
+  // ==========================================
+  Future<void> _fetchPins() async {
+    final mapId = _activeBlankMapId;
+    if (mapId == null || mapId.isEmpty) return;
+
+    setState(() => _pinsLoading = true);
+    try {
+      final token = await _getToken();
+      final uri = Uri.parse(
+        '$baseUrl/pins',
+      ).replace(queryParameters: {'blank_map_id': mapId});
+
+      final res = await http.get(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
       );
-    });
-    _toast('Pinned to ${widget.activeLayer}  ·  +10 Karma');
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as List;
+
+        // Fetch feedback counts for all pins concurrently
+        final pins = await Future.wait(
+          data.map((json) async {
+            final pinId = json['id'] as String;
+            final counts = await _fetchFeedbackCounts(pinId);
+            return MapPin(
+              id: pinId,
+              location: LatLng(
+                (json['latitude'] as num).toDouble(),
+                (json['longitude'] as num).toDouble(),
+              ),
+              layer: widget.activeLayer,
+              upvotes: counts.$1,
+              downvotes: counts.$2,
+            );
+          }),
+        );
+
+        if (mounted) setState(() => _pins = pins);
+      } else {
+        debugPrint('Fetch pins error ${res.statusCode}: ${res.body}');
+      }
+    } catch (e) {
+      debugPrint('Fetch pins exception: $e');
+    } finally {
+      if (mounted) setState(() => _pinsLoading = false);
+    }
   }
 
+  // ==========================================
+  // API – GET /pins/:pinID/feedback  → (upvotes, downvotes)
+  // rating >= 1  → upvote
+  // rating <= -1 → downvote
+  // ==========================================
+  Future<(int, int)> _fetchFeedbackCounts(String pinId) async {
+    try {
+      final token = await _getToken();
+      final res = await http.get(
+        Uri.parse('$baseUrl/pins/$pinId/feedback'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+      );
+      if (res.statusCode == 200) {
+        final list = jsonDecode(res.body) as List;
+        int up = 0, down = 0;
+        for (final f in list) {
+          final rating = f['rating'] as int? ?? 0;
+          if (rating >= 1) up++;
+          if (rating <= -1) down++;
+        }
+        return (up, down);
+      }
+    } catch (e) {
+      debugPrint('Fetch feedback error for $pinId: $e');
+    }
+    return (0, 0);
+  }
+
+  // ==========================================
+  // API – POST /pins  (replaces the old local-only _dropPin)
+  // ==========================================
+  void _dropPin() async {
+    final mapId = _activeBlankMapId;
+    if (mapId == null || mapId.isEmpty) {
+      _toast('Select a map layer first');
+      return;
+    }
+
+    final center = _mapCtrl.camera.center;
+    try {
+      final token = await _getToken();
+      final res = await http.post(
+        Uri.parse('$baseUrl/pins'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'name': 'Pin on ${widget.activeLayer}',
+          'blank_map_id': mapId,
+          'latitude': center.latitude,
+          'longitude': center.longitude,
+        }),
+      );
+
+      if (res.statusCode == 200 || res.statusCode == 201) {
+        final json = jsonDecode(res.body) as Map<String, dynamic>;
+        final newPin = MapPin(
+          id: json['id'] as String,
+          location: LatLng(
+            (json['latitude'] as num).toDouble(),
+            (json['longitude'] as num).toDouble(),
+          ),
+          layer: widget.activeLayer,
+          upvotes: 1,
+          downvotes: 0,
+        );
+        if (mounted) setState(() => _pins.add(newPin));
+        _toast('Pinned to ${widget.activeLayer}  ·  +10 Karma');
+      } else {
+        debugPrint('Create pin error ${res.statusCode}: ${res.body}');
+        _toast('Failed to drop pin');
+      }
+    } catch (e) {
+      debugPrint('Drop pin exception: $e');
+      _toast('Failed to drop pin');
+    }
+  }
+
+  // ==========================================
+  // API – POST /feedback  (upvote rating=1 / downvote rating=-1)
+  // ==========================================
+  Future<void> _submitFeedback({
+    required MapPin pin,
+    required int rating,
+    required VoidCallback onSuccess,
+  }) async {
+    try {
+      final token = await _getToken();
+      final res = await http.post(
+        Uri.parse('$baseUrl/feedback'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'pin_id': pin.id, 'rating': rating}),
+      );
+      if (res.statusCode == 200 || res.statusCode == 201) {
+        onSuccess();
+      } else {
+        debugPrint('Feedback error ${res.statusCode}: ${res.body}');
+      }
+    } catch (e) {
+      debugPrint('Feedback exception: $e');
+    }
+  }
+
+  // ==========================================
+  // API – DELETE /pins/:id
+  // ==========================================
+  Future<void> _deletePin(MapPin pin) async {
+    try {
+      final token = await _getToken();
+      final res = await http.delete(
+        Uri.parse('$baseUrl/pins/${pin.id}'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+      );
+      if (res.statusCode == 200 || res.statusCode == 204) {
+        if (mounted) setState(() => _pins.remove(pin));
+        _toast('Pin removed');
+      } else {
+        debugPrint('Delete pin error ${res.statusCode}: ${res.body}');
+        _toast('Failed to remove pin');
+      }
+    } catch (e) {
+      debugPrint('Delete pin exception: $e');
+      _toast('Failed to remove pin');
+    }
+  }
+
+  // ── Toast (unchanged) ────────────────────────────────────────────────────
   void _toast(String msg) {
     showCupertinoDialog(
       context: context,
@@ -145,6 +368,7 @@ class _MapScreenState extends State<MapScreen> {
     });
   }
 
+  // ── Pin sheet – upvote/downvote now call API; delete button added ─────────
   void _showPinSheet(MapPin pin) {
     showCupertinoModalPopup(
       context: context,
@@ -170,7 +394,6 @@ class _MapScreenState extends State<MapScreen> {
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
-
               // Icon
               Container(
                 width: 54,
@@ -188,7 +411,6 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
               const SizedBox(height: 14),
-
               Text(
                 pin.layer,
                 style: const TextStyle(
@@ -204,7 +426,6 @@ class _MapScreenState extends State<MapScreen> {
                 style: const TextStyle(color: BM.textTer, fontSize: 11),
               ),
               const SizedBox(height: 10),
-
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 14,
@@ -224,18 +445,22 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                 ),
               ),
-
               const SizedBox(height: 24),
-
               Row(
                 children: [
-                  // Works
+                  // Works – POST /feedback rating=1
                   Expanded(
                     child: GestureDetector(
                       onTap: () {
-                        setSheet(() => pin.upvotes++);
-                        setState(() {});
-                        Navigator.pop(ctx);
+                        _submitFeedback(
+                          pin: pin,
+                          rating: 1,
+                          onSuccess: () {
+                            setSheet(() => pin.upvotes++);
+                            setState(() {});
+                            Navigator.pop(ctx);
+                          },
+                        );
                       },
                       child: Container(
                         padding: const EdgeInsets.symmetric(vertical: 15),
@@ -268,13 +493,19 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
                   const SizedBox(width: 12),
-                  // Broken
+                  // Broken – POST /feedback rating=-1
                   Expanded(
                     child: GestureDetector(
                       onTap: () {
-                        setSheet(() => pin.downvotes++);
-                        setState(() {});
-                        Navigator.pop(ctx);
+                        _submitFeedback(
+                          pin: pin,
+                          rating: -1,
+                          onSuccess: () {
+                            setSheet(() => pin.downvotes++);
+                            setState(() {});
+                            Navigator.pop(ctx);
+                          },
+                        );
                       },
                       child: Container(
                         padding: const EdgeInsets.symmetric(vertical: 15),
@@ -305,6 +536,38 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 12),
+              // Delete pin – DELETE /pins/:id
+              GestureDetector(
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _deletePin(pin);
+                },
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  decoration: BoxDecoration(
+                    color: BM.danger.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(15),
+                    border: Border.all(color: BM.danger.withOpacity(0.25)),
+                  ),
+                  child: const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(CupertinoIcons.trash, color: BM.danger, size: 15),
+                      SizedBox(width: 8),
+                      Text(
+                        'Remove Pin',
+                        style: TextStyle(
+                          color: BM.danger,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ],
           ),
@@ -374,12 +637,10 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ],
           ),
-
           // ── CROSSHAIR ────────────────────────────
           const Center(
             child: Icon(CupertinoIcons.plus, color: Colors.black54, size: 26),
           ),
-
           // ── TOP GRADIENT + LAYER CHIPS ────────────
           Positioned(
             top: 0,
@@ -443,7 +704,6 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
-
           // ── LOCATE ME BUTTON ─────────────────────
           Positioned(
             top: topPad + 58,
@@ -476,7 +736,38 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
-
+          // ── PINS LOADING INDICATOR ────────────────
+          if (_pinsLoading)
+            Positioned(
+              top: topPad + 58,
+              left: 14,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: BM.surface,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: BM.border),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CupertinoActivityIndicator(color: BM.accent, radius: 7),
+                    SizedBox(width: 8),
+                    Text(
+                      'Loading pins...',
+                      style: TextStyle(
+                        color: BM.textSec,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           // ── GPS LOADING ───────────────────────────
           if (!_locLoaded)
             Positioned(
@@ -512,7 +803,6 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
-
           // ── DROP PIN BUTTON ───────────────────────
           Positioned(
             bottom: 20,
