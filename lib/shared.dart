@@ -1,7 +1,7 @@
-import 'dart:ui';
-
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+
+const baseUrl = "http://10.66.139.169:9000";
 
 class BM {
   static const bg = Color(0xFF0A0A0A);

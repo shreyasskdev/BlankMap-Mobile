@@ -2,33 +2,16 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_iconpicker/Models/configuration.dart';
 import 'package:flutter_iconpicker/flutter_iconpicker.dart';
+import 'package:http/http.dart' as http;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'dart:convert';
+
+// Make sure your shared.dart contains BM color constants and baseUrl
 import 'shared.dart';
 
-// ==========================================
-// 1. APP ENTRY & THEME
-// ==========================================
 void main() {
   runApp(const BlankMapApp());
 }
-
-final List<Map<String, dynamic>> allBlankMaps = [
-  {
-    'tag': 'r/BrokenBenches',
-    'desc': 'Track broken benches in the park.',
-    'pins': '42',
-    'icon': CupertinoIcons.placemark,
-    'hot': true,
-    'userCreated': false,
-  },
-  {
-    'tag': 'r/StrayCats',
-    'desc': 'Sightings of stray cats around the city.',
-    'pins': '128',
-    'icon': CupertinoIcons.paw,
-    'hot': true,
-    'userCreated': false,
-  },
-];
 
 class BlankMapApp extends StatelessWidget {
   const BlankMapApp({super.key});
@@ -56,7 +39,7 @@ class BlankMapApp extends StatelessWidget {
 }
 
 // ==========================================
-// 2. BLANKMAPS SCREEN
+// MAIN SCREEN – combines UI from first with API from second
 // ==========================================
 class BlankMapsScreen extends StatefulWidget {
   final Function(String) onTagSelected;
@@ -68,32 +51,89 @@ class BlankMapsScreen extends StatefulWidget {
 
 class _BlankMapsScreenState extends State<BlankMapsScreen> {
   final TextEditingController _searchCtrl = TextEditingController();
-  final List<Map<String, dynamic>> _userCreatedMaps = [];
+  final storage = const FlutterSecureStorage();
+
+  List<Map<String, dynamic>> _maps = [];
+  bool _loading = true;
+
   bool _isSearching = false;
   String _query = '';
 
-  List<Map<String, dynamic>> get _allMaps => [
-    ...allBlankMaps,
-    ..._userCreatedMaps,
-  ];
-
-  List<Map<String, dynamic>> get _trendingMaps =>
-      _allMaps.where((m) => m['hot'] == true).toList();
-
   @override
-  void dispose() {
-    _searchCtrl.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    fetchMaps();
   }
 
+  Future<String?> _getToken() async {
+    return await storage.read(key: "jwt");
+  }
+
+  Future<void> fetchMaps() async {
+    try {
+      final token = await _getToken();
+      final res = await http.get(
+        Uri.parse("$baseUrl/blank-maps"),
+        headers: {
+          "Authorization": "Bearer $token",
+          "Content-Type": "application/json",
+        },
+      );
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as List;
+        setState(() {
+          _maps = data.map((e) => Map<String, dynamic>.from(e)).toList();
+          _loading = false;
+        });
+      } else {
+        debugPrint("MAP FETCH ERROR ${res.body}");
+        setState(() => _loading = false);
+      }
+    } catch (e) {
+      debugPrint("Fetch error $e");
+      setState(() => _loading = false);
+    }
+  }
+
+  Future<void> createMap(Map<String, dynamic> map) async {
+    try {
+      final token = await _getToken();
+      final res = await http.post(
+        Uri.parse("$baseUrl/blank-maps"),
+        headers: {
+          "Authorization": "Bearer $token",
+          "Content-Type": "application/json",
+        },
+        body: jsonEncode(map),
+      );
+
+      if (res.statusCode == 201 || res.statusCode == 200) {
+        fetchMaps(); // refresh list
+      } else {
+        debugPrint("Create map error ${res.body}");
+      }
+    } catch (e) {
+      debugPrint("Create error $e");
+    }
+  }
+
+  // Filter maps based on search query
   List<Map<String, dynamic>> get _filtered {
-    if (_query.isEmpty) return _allMaps;
+    if (_query.isEmpty) return _maps;
     final q = _query.toLowerCase();
-    return _allMaps.where((m) {
-      return (m['tag'] as String).toLowerCase().contains(q) ||
-          (m['desc'] as String).toLowerCase().contains(q);
+    return _maps.where((m) {
+      final tag = (m['tag'] ?? m['name'] ?? '').toString().toLowerCase();
+      final desc = (m['desc'] ?? m['description'] ?? '')
+          .toString()
+          .toLowerCase();
+      return tag.contains(q) || desc.contains(q);
     }).toList();
   }
+
+  // Trending maps (if your API provides a 'hot' field, otherwise empty)
+  List<Map<String, dynamic>> get _trendingMaps =>
+      _maps.where((m) => m['hot'] == true).toList();
 
   void _openCreateSheet() {
     showCupertinoModalPopup(
@@ -102,7 +142,7 @@ class _BlankMapsScreenState extends State<BlankMapsScreen> {
         type: MaterialType.transparency,
         child: _CreateBlankMapSheet(
           onCreated: (newMap) {
-            setState(() => _userCreatedMaps.add(newMap));
+            createMap(newMap);
           },
         ),
       ),
@@ -111,6 +151,13 @@ class _BlankMapsScreenState extends State<BlankMapsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_loading) {
+      return const CupertinoPageScaffold(
+        backgroundColor: BM.bg,
+        child: Center(child: CupertinoActivityIndicator()),
+      );
+    }
+
     return CupertinoPageScaffold(
       backgroundColor: BM.bg,
       navigationBar: CupertinoNavigationBar(
@@ -135,7 +182,7 @@ class _BlankMapsScreenState extends State<BlankMapsScreen> {
                 border: Border.all(color: BM.accent.withOpacity(0.3)),
               ),
               child: Text(
-                '${_allMaps.length} maps',
+                '${_maps.length} maps',
                 style: const TextStyle(
                   color: BM.accent,
                   fontSize: 11,
@@ -189,7 +236,7 @@ class _BlankMapsScreenState extends State<BlankMapsScreen> {
                   child: _CreateBanner(onTap: _openCreateSheet),
                 ),
               ),
-            if (!_isSearching) ...[
+            if (!_isSearching && _trendingMaps.isNotEmpty) ...[
               const SliverToBoxAdapter(
                 child: _SectionHeader(
                   icon: CupertinoIcons.flame_fill,
@@ -204,14 +251,17 @@ class _BlankMapsScreenState extends State<BlankMapsScreen> {
                   delegate: SliverChildBuilderDelegate(
                     (_, i) => _MapCard(
                       item: _trendingMaps[i],
-                      onTap: () =>
-                          widget.onTagSelected(_trendingMaps[i]['tag']),
+                      onTap: () => widget.onTagSelected(
+                        _trendingMaps[i]['tag'] ?? _trendingMaps[i]['name'],
+                      ),
                       showHot: true,
                     ),
                     childCount: _trendingMaps.length,
                   ),
                 ),
               ),
+            ],
+            if (!_isSearching)
               const SliverToBoxAdapter(
                 child: _SectionHeader(
                   icon: CupertinoIcons.square_grid_2x2_fill,
@@ -220,7 +270,6 @@ class _BlankMapsScreenState extends State<BlankMapsScreen> {
                   topPad: 20,
                 ),
               ),
-            ],
             if (_isSearching)
               SliverToBoxAdapter(
                 child: _SectionHeader(
@@ -234,18 +283,19 @@ class _BlankMapsScreenState extends State<BlankMapsScreen> {
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 30),
               sliver: SliverList(
-                delegate: SliverChildBuilderDelegate(
-                  (_, i) {
-                    final list = _isSearching ? _filtered : _allMaps;
-                    if (i >= list.length) return const SizedBox.shrink();
-                    return _MapCard(
-                      item: list[i],
-                      onTap: () => widget.onTagSelected(list[i]['tag']),
-                      isUserCreated: list[i]['userCreated'] == true,
-                    );
-                  },
-                  childCount: _isSearching ? _filtered.length : _allMaps.length,
-                ),
+                delegate: SliverChildBuilderDelegate((_, i) {
+                  final list = _isSearching ? _filtered : _maps;
+                  if (i >= list.length) return const SizedBox.shrink();
+                  final item = list[i];
+                  // Determine if it's user created (if your API provides a flag)
+                  final isUserCreated = item['userCreated'] == true;
+                  return _MapCard(
+                    item: item,
+                    onTap: () =>
+                        widget.onTagSelected(item['tag'] ?? item['name']),
+                    isUserCreated: isUserCreated,
+                  );
+                }, childCount: _isSearching ? _filtered.length : _maps.length),
               ),
             ),
           ],
@@ -256,7 +306,7 @@ class _BlankMapsScreenState extends State<BlankMapsScreen> {
 }
 
 // ==========================================
-// 3. CREATE BLANKMAP BOTTOM SHEET
+// CREATE MAP SHEET (UI from first, but calls createMap)
 // ==========================================
 class _CreateBlankMapSheet extends StatefulWidget {
   final Function(Map<String, dynamic>) onCreated;
@@ -273,7 +323,7 @@ class _CreateBlankMapSheetState extends State<_CreateBlankMapSheet> {
   IconPickerIcon _pickedIcon = IconPickerIcon(
     name: 'location_on',
     data: Icons.location_on,
-    pack: 'material cupertino',
+    pack: 'material',
   );
   bool _iconWasPicked = false;
   String? _nameError;
@@ -289,7 +339,7 @@ class _CreateBlankMapSheetState extends State<_CreateBlankMapSheet> {
     final picked = await showIconPicker(
       context,
       configuration: SinglePickerConfiguration(
-        iconPackModes: [IconPack.cupertino, IconPack.material],
+        iconPackModes: [IconPack.cupertino],
         backgroundColor: BM.surface,
         iconColor: BM.textSec,
         selectedIconBackgroundColor: BM.accent,
@@ -336,16 +386,21 @@ class _CreateBlankMapSheetState extends State<_CreateBlankMapSheet> {
     final cleaned = raw.replaceFirst(RegExp(r'^r/'), '');
     final tag = 'r/${cleaned[0].toUpperCase()}${cleaned.substring(1)}';
 
-    widget.onCreated({
-      'tag': tag,
-      'desc': _descCtrl.text.trim().isEmpty
+    // Build payload for API – adjust keys to match your backend
+    final newMap = {
+      'name': tag, // or 'tag' if your API expects that
+      'description': _descCtrl.text.trim().isEmpty
           ? 'A community-created BlankMap.'
           : _descCtrl.text.trim(),
-      'pins': '0',
-      'icon': _pickedIcon.data,
-      'hot': false,
-      'userCreated': true,
-    });
+      // Store icon name (string) – you'll need to map back to IconData when displaying
+      'icon': _pickedIcon.name,
+      // Optionally include the icon pack if needed
+      'iconPack': _pickedIcon.pack,
+      // The API might also expect initial pins count
+      'pins': 0,
+    };
+
+    widget.onCreated(newMap);
     Navigator.pop(context);
   }
 
@@ -653,7 +708,7 @@ class _CreateBlankMapSheetState extends State<_CreateBlankMapSheet> {
 }
 
 // ==========================================
-// 4. HELPER WIDGETS
+// HELPER WIDGETS (unchanged from first snippet)
 // ==========================================
 class _CreateBanner extends StatelessWidget {
   final VoidCallback onTap;
@@ -945,8 +1000,28 @@ class _MapCard extends StatelessWidget {
     this.isUserCreated = false,
   });
 
+  // Helper to get icon data from stored name – you'll want to expand this
+  // or use a proper mapping. For now we fallback to a default icon.
+  IconData _getIconData() {
+    // Try to get from the item; if it's an IconData stored directly, use it.
+    if (item['iconData'] != null && item['iconData'] is IconData) {
+      return item['iconData'] as IconData;
+    }
+    // If we have a string name, you could map it here.
+    // This is a simplified example – you'd need to map strings to actual IconData.
+    const defaultIcon = CupertinoIcons.placemark;
+    return defaultIcon;
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Determine which keys to use – your API might return 'name' and 'description'
+    final tag = item['tag'] ?? item['name'] ?? 'Unnamed';
+    final desc = item['desc'] ?? item['description'] ?? '';
+    final pins = item['pins']?.toString() ?? '0';
+    final hot = item['hot'] == true;
+    final icon = _getIconData();
+
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -969,7 +1044,7 @@ class _MapCard extends StatelessWidget {
                 borderRadius: BorderRadius.circular(13),
                 border: Border.all(color: BM.accent.withOpacity(0.25)),
               ),
-              child: Icon(item['icon'] as IconData, color: BM.accent, size: 20),
+              child: Icon(icon, color: BM.accent, size: 20),
             ),
             const SizedBox(width: 13),
             Expanded(
@@ -980,7 +1055,7 @@ class _MapCard extends StatelessWidget {
                     children: [
                       Flexible(
                         child: Text(
-                          item['tag'] as String,
+                          tag,
                           style: const TextStyle(
                             fontWeight: FontWeight.w700,
                             fontSize: 14,
@@ -989,7 +1064,7 @@ class _MapCard extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      if (showHot && item['hot'] == true) ...[
+                      if (showHot && hot) ...[
                         const SizedBox(width: 7),
                         const _Badge(label: 'HOT', color: BM.warn),
                       ],
@@ -1001,7 +1076,7 @@ class _MapCard extends StatelessWidget {
                   ),
                   const SizedBox(height: 3),
                   Text(
-                    item['desc'] as String,
+                    desc,
                     style: const TextStyle(color: BM.textSec, fontSize: 12),
                   ),
                 ],
@@ -1011,7 +1086,7 @@ class _MapCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 Text(
-                  item['pins'] as String,
+                  pins,
                   style: const TextStyle(
                     color: BM.accent,
                     fontWeight: FontWeight.w700,

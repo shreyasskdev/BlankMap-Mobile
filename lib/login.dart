@@ -5,8 +5,6 @@ import 'package:flutter/cupertino.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-const baseUrl = "http://10.66.139.169:9000";
-
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
