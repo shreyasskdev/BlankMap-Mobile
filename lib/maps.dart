@@ -206,6 +206,23 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  // ── GET /pins/:id/rating  → { total_reviews, average_rating } ───────────
+  Future<Map<String, dynamic>?> _fetchRating(String pinId) async {
+    try {
+      final token = await _getToken();
+      final res = await http.get(
+        Uri.parse('$baseUrl/pins/$pinId/rating'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (res.statusCode == 200) {
+        return jsonDecode(res.body) as Map<String, dynamic>;
+      }
+    } catch (e) {
+      debugPrint('Fetch rating error: $e');
+    }
+    return null;
+  }
+
   // ── Delete pin ────────────────────────────────────────────────────────────
   Future<void> _deletePin(MapPin pin) async {
     try {
@@ -277,127 +294,15 @@ class _MapScreenState extends State<MapScreen> {
   void _showPinSheet(MapPin pin) {
     showCupertinoModalPopup(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) {
-          int selectedStars = 0;
-          return Container(
-            margin: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-            padding: const EdgeInsets.fromLTRB(22, 18, 22, 32),
-            decoration: BoxDecoration(
-              color: BM.surface,
-              borderRadius: BorderRadius.circular(26),
-              border: Border.all(color: BM.border),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Handle
-                Container(
-                  width: 36,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 18),
-                  decoration: BoxDecoration(
-                    color: BM.border,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                // Icon
-                Container(
-                  width: 54,
-                  height: 54,
-                  decoration: BoxDecoration(
-                    color: BM.accentSoft,
-                    borderRadius: BorderRadius.circular(17),
-                    border: Border.all(color: BM.accent.withOpacity(0.35)),
-                  ),
-                  child: const Icon(
-                    CupertinoIcons.location_solid,
-                    color: BM.accent,
-                    size: 38,
-                    shadows: [Shadow(color: Colors.black54, blurRadius: 10)],
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Text(
-                  pin.layer,
-                  style: const TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w800,
-                    color: BM.textPri,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '${pin.location.latitude.toStringAsFixed(5)}, '
-                  '${pin.location.longitude.toStringAsFixed(5)}',
-                  style: const TextStyle(color: BM.textTer, fontSize: 11),
-                ),
-                const SizedBox(height: 28),
-
-                // ── 5 Stars ────────────────────────────────────────────
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: List.generate(5, (i) {
-                    final filled = i < selectedStars;
-                    return GestureDetector(
-                      onTap: () {
-                        setSheet(() => selectedStars = i + 1);
-                        _submitRating(pin.id, i + 1);
-                        Future.delayed(const Duration(milliseconds: 500), () {
-                          if (ctx.mounted) Navigator.pop(ctx);
-                          _toast('Thanks for rating!');
-                        });
-                      },
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
-                        child: Icon(
-                          filled
-                              ? CupertinoIcons.star_fill
-                              : CupertinoIcons.star,
-                          color: filled ? const Color(0xFFFFC107) : BM.textTer,
-                          size: 38,
-                        ),
-                      ),
-                    );
-                  }),
-                ),
-                const SizedBox(height: 28),
-
-                // ── Delete ────────────────────────────────────────────
-                GestureDetector(
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _deletePin(pin);
-                  },
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(vertical: 13),
-                    decoration: BoxDecoration(
-                      color: BM.danger.withOpacity(0.08),
-                      borderRadius: BorderRadius.circular(15),
-                      border: Border.all(color: BM.danger.withOpacity(0.25)),
-                    ),
-                    child: const Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(CupertinoIcons.trash, color: BM.danger, size: 15),
-                        SizedBox(width: 8),
-                        Text(
-                          'Remove Pin',
-                          style: TextStyle(
-                            color: BM.danger,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          );
+      builder: (ctx) => _PinSheet(
+        pin: pin,
+        fetchRating: () => _fetchRating(pin.id),
+        onRate: (rating) => _submitRating(pin.id, rating),
+        onDelete: () {
+          Navigator.pop(ctx);
+          _deletePin(pin);
         },
+        onRated: () => _toast('Thanks for rating!'),
       ),
     );
   }
@@ -605,6 +510,215 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ],
                 ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ==========================================
+// PIN SHEET WIDGET
+// ==========================================
+class _PinSheet extends StatefulWidget {
+  final MapPin pin;
+  final Future<Map<String, dynamic>?> Function() fetchRating;
+  final Future<void> Function(int rating) onRate;
+  final VoidCallback onDelete;
+  final VoidCallback onRated;
+
+  const _PinSheet({
+    required this.pin,
+    required this.fetchRating,
+    required this.onRate,
+    required this.onDelete,
+    required this.onRated,
+  });
+
+  @override
+  State<_PinSheet> createState() => _PinSheetState();
+}
+
+class _PinSheetState extends State<_PinSheet> {
+  int _selectedStars = 0;
+  int _totalReviews = 0;
+  double _avgRating = 0;
+  bool _loadingRating = true;
+  bool _submitted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadRating();
+  }
+
+  Future<void> _loadRating() async {
+    final data = await widget.fetchRating();
+    if (mounted) {
+      setState(() {
+        _totalReviews = (data?['total_reviews'] as num?)?.toInt() ?? 0;
+        _avgRating = (data?['average_rating'] as num?)?.toDouble() ?? 0;
+        _loadingRating = false;
+      });
+    }
+  }
+
+  Future<void> _rate(int stars) async {
+    setState(() {
+      _selectedStars = stars;
+      _submitted = true;
+    });
+    await widget.onRate(stars);
+    // Refresh from API after submitting
+    final data = await widget.fetchRating();
+    if (mounted) {
+      setState(() {
+        _totalReviews = (data?['total_reviews'] as num?)?.toInt() ?? 0;
+        _avgRating = (data?['average_rating'] as num?)?.toDouble() ?? 0;
+      });
+    }
+    widget.onRated();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+      padding: const EdgeInsets.fromLTRB(22, 18, 22, 32),
+      decoration: BoxDecoration(
+        color: BM.surface,
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(color: BM.border),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Handle
+          Container(
+            width: 36,
+            height: 4,
+            margin: const EdgeInsets.only(bottom: 18),
+            decoration: BoxDecoration(
+              color: BM.border,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          // Icon
+          Container(
+            width: 54,
+            height: 54,
+            decoration: BoxDecoration(
+              color: BM.accentSoft,
+              borderRadius: BorderRadius.circular(17),
+              border: Border.all(color: BM.accent.withOpacity(0.35)),
+            ),
+            child: const Icon(
+              CupertinoIcons.location_solid,
+              color: BM.accent,
+              size: 38,
+              shadows: [Shadow(color: Colors.black54, blurRadius: 10)],
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            widget.pin.layer,
+            style: const TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+              color: BM.textPri,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '${widget.pin.location.latitude.toStringAsFixed(5)}, '
+            '${widget.pin.location.longitude.toStringAsFixed(5)}',
+            style: const TextStyle(color: BM.textTer, fontSize: 11),
+          ),
+          const SizedBox(height: 20),
+
+          // ── Current rating summary ──────────────────────────────────
+          _loadingRating
+              ? const CupertinoActivityIndicator(color: BM.accent, radius: 8)
+              : _totalReviews == 0
+              ? const Text(
+                  'No ratings yet',
+                  style: TextStyle(color: BM.textTer, fontSize: 12),
+                )
+              : Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      CupertinoIcons.star_fill,
+                      color: Color(0xFFFFC107),
+                      size: 16,
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      _avgRating % 1 == 0
+                          ? '${_avgRating.toInt()}'
+                          : _avgRating.toStringAsFixed(1),
+                      style: const TextStyle(
+                        color: BM.textPri,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      '($_totalReviews ${_totalReviews == 1 ? 'rating' : 'ratings'})',
+                      style: const TextStyle(color: BM.textTer, fontSize: 12),
+                    ),
+                  ],
+                ),
+          const SizedBox(height: 24),
+
+          // ── Star picker (locked after submit) ───────────────────────
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(5, (i) {
+              final filled = i < _selectedStars;
+              return GestureDetector(
+                onTap: _submitted ? null : () => _rate(i + 1),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  child: Icon(
+                    filled ? CupertinoIcons.star_fill : CupertinoIcons.star,
+                    color: filled ? const Color(0xFFFFC107) : BM.textTer,
+                    size: 38,
+                  ),
+                ),
+              );
+            }),
+          ),
+          const SizedBox(height: 28),
+
+          // ── Delete ──────────────────────────────────────────────────
+          GestureDetector(
+            onTap: widget.onDelete,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 13),
+              decoration: BoxDecoration(
+                color: BM.danger.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(15),
+                border: Border.all(color: BM.danger.withOpacity(0.25)),
+              ),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(CupertinoIcons.trash, color: BM.danger, size: 15),
+                  SizedBox(width: 8),
+                  Text(
+                    'Remove Pin',
+                    style: TextStyle(
+                      color: BM.danger,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
